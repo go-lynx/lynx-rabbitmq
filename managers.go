@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
-	"github.com/go-lynx/lynx/plugins/mq/rabbitmq/conf"
+	"github.com/go-lynx/lynx-rabbitmq/conf"
+	"github.com/go-lynx/lynx/log"
 )
 
 // HealthChecker represents a health checker for RabbitMQ client
@@ -41,7 +41,7 @@ func (h *HealthChecker) Stop() {
 	h.mu.Lock()
 	stopped := h.stopped
 	h.mu.Unlock()
-	
+
 	if !stopped {
 		h.stopOnce.Do(func() {
 			close(h.stopChan)
