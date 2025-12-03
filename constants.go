@@ -18,7 +18,7 @@ const (
 	defaultChannelPoolSize = 10
 	defaultVirtualHost     = "/"
 
-	// Exchange types
+	// ExchangeTypeDirect Exchange types
 	ExchangeTypeDirect  = "direct"
 	ExchangeTypeFanout  = "fanout"
 	ExchangeTypeTopic   = "topic"
