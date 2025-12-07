@@ -5,7 +5,7 @@ go 1.25
 toolchain go1.25.3
 
 require (
-	github.com/go-lynx/lynx v1.2.3
+	github.com/go-lynx/lynx v1.5.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 	google.golang.org/protobuf v1.36.10
 )
@@ -28,11 +28,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/grpc v1.73.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/go-lynx/lynx => ../lynx
