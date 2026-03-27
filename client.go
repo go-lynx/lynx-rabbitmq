@@ -16,6 +16,7 @@ import (
 type RabbitMQClient struct {
 	*plugins.BasePlugin
 	config            *conf.RabbitMQ
+	rt                plugins.Runtime
 	connection        *amqp.Connection
 	producers         map[string]*amqp.Channel
 	consumers         map[string]*amqp.Channel
@@ -93,6 +94,7 @@ func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
 	if err := r.BasePlugin.InitializeResources(rt); err != nil {
 		return err
 	}
+	r.rt = rt
 
 	// Initialize managers
 	r.healthChecker = NewHealthChecker()
@@ -127,6 +129,42 @@ func (r *RabbitMQClient) StartupTasks() error {
 
 	// Start connection manager
 	r.connectionManager.Start()
+
+	if r.rt != nil {
+		if err := r.rt.RegisterSharedResource(pluginName, r); err != nil {
+			return fmt.Errorf("failed to register RabbitMQ shared resource: %w", err)
+		}
+		if r.connection != nil {
+			if err := r.rt.RegisterPrivateResource("connection", r.connection); err != nil {
+				log.Warnf("failed to register RabbitMQ private connection resource: %v", err)
+			}
+		}
+		if len(r.producers) > 0 {
+			if err := r.rt.RegisterPrivateResource("producers", r.producers); err != nil {
+				log.Warnf("failed to register RabbitMQ private producers resource: %v", err)
+			}
+		}
+		if len(r.consumers) > 0 {
+			if err := r.rt.RegisterPrivateResource("consumers", r.consumers); err != nil {
+				log.Warnf("failed to register RabbitMQ private consumers resource: %v", err)
+			}
+		}
+		if r.connectionManager != nil {
+			if err := r.rt.RegisterPrivateResource("connection_manager", r.connectionManager); err != nil {
+				log.Warnf("failed to register RabbitMQ private connection manager resource: %v", err)
+			}
+		}
+		if r.healthChecker != nil {
+			if err := r.rt.RegisterPrivateResource("health_checker", r.healthChecker); err != nil {
+				log.Warnf("failed to register RabbitMQ private health checker resource: %v", err)
+			}
+		}
+		if r.retryHandler != nil {
+			if err := r.rt.RegisterPrivateResource("retry_handler", r.retryHandler); err != nil {
+				log.Warnf("failed to register RabbitMQ private retry handler resource: %v", err)
+			}
+		}
+	}
 
 	log.Infof("RabbitMQ client successfully initialized")
 	return nil
