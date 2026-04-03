@@ -16,80 +16,65 @@ The RabbitMQ plugin provides integration with RabbitMQ message broker for the Ly
 
 ## Configuration
 
-### Basic Configuration
+### Configuration Options
+
+#### Global Options
+- `urls` (repeated string, required): List of RabbitMQ server addresses. Example: `["amqp://localhost:5672/"]`
+- `username` (string, optional): Username for authentication.
+- `password` (string, optional): Password for authentication.
+- `virtual_host` (string, default: `"/"`): RabbitMQ virtual host.
+- `dial_timeout` (duration, default: `"10s"`): Connection timeout.
+- `heartbeat` (duration, default: `"10s"`): Heartbeat interval.
+- `channel_pool_size` (int32, default: `0`): Channel pool size.
+
+#### Producer Configuration
+- `enabled` (bool, default: `false`): Whether to enable the producer.
+- `exchange` (string, default: `"lynx.exchange"`): Exchange name.
+- `exchange_type` (string, default: `"direct"`): Exchange type (`direct`, `fanout`, `topic`, `headers`).
+- `routing_key` (string, default: `""`): Routing key.
+- `max_retries` (int32, default: `3`): Maximum number of retries.
+- `retry_backoff` (duration, default: `"100ms"`): Retry interval.
+- `publish_timeout` (duration, default: `"3s"`): Publish timeout.
+- `name` (string, default: `""`): Producer instance name (for differentiation/routing).
+- `exchange_durable` (bool, default: `true`): Whether exchange is durable.
+- `exchange_auto_delete` (bool, default: `false`): Whether exchange is auto-deleted.
+- `message_persistent` (bool, default: `true`): Whether message is persistent.
+
+#### Consumer Configuration
+- `enabled` (bool, default: `false`): Whether to enable the consumer.
+- `queue` (string, default: `"lynx.queue"`): Queue name.
+- `exchange` (string, default: `""`): Exchange name to bind.
+- `routing_key` (string, default: `""`): Routing key for binding.
+- `consumer_tag` (string, default: `"lynx.consumer"`): Consumer tag.
+- `max_concurrency` (int32, default: `1`): Maximum processing concurrency.
+- `prefetch_count` (int32, default: `1`): Prefetch count.
+- `name` (string, default: `""`): Consumer instance name.
+- `queue_durable` (bool, default: `true`): Whether queue is durable.
+- `queue_auto_delete` (bool, default: `false`): Whether queue is auto-deleted.
+- `queue_exclusive` (bool, default: `false`): Whether queue is exclusive.
+- `auto_ack` (bool, default: `false`): Whether to auto-ack messages.
+
+### Basic Configuration Example
 
 ```yaml
 rabbitmq:
   urls:
     - "amqp://guest:guest@localhost:5672/"
-    - "amqp://guest:guest@localhost:5673/"
-  username: "guest"
-  password: "guest"
-  virtual_host: "/"
-  dial_timeout: "3s"
-  heartbeat: "30s"
-  channel_pool_size: 10
-  
   producers:
     - name: "default-producer"
       enabled: true
       exchange: "lynx.exchange"
       exchange_type: "direct"
       routing_key: "lynx.routing.key"
-      max_retries: 3
-      retry_backoff: "100ms"
-      publish_timeout: "3s"
-      exchange_durable: true
-      exchange_auto_delete: false
-      message_persistent: true
-      
   consumers:
     - name: "default-consumer"
       enabled: true
       queue: "lynx.queue"
       exchange: "lynx.exchange"
       routing_key: "lynx.routing.key"
-      consumer_tag: "lynx.consumer"
-      max_concurrency: 1
-      prefetch_count: 1
-      queue_durable: true
-      queue_auto_delete: false
-      queue_exclusive: false
-      auto_ack: false
 ```
 
-### Producer Configuration
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | false | Whether to enable the producer |
-| `exchange` | string | "lynx.exchange" | Exchange name |
-| `exchange_type` | string | "direct" | Exchange type (direct/fanout/topic/headers) |
-| `routing_key` | string | "" | Routing key |
-| `max_retries` | int | 3 | Maximum number of retries |
-| `retry_backoff` | duration | "100ms" | Retry interval |
-| `publish_timeout` | duration | "3s" | Publish timeout |
-| `name` | string | "" | Producer instance name |
-| `exchange_durable` | bool | true | Whether exchange is durable |
-| `exchange_auto_delete` | bool | false | Whether exchange is auto-deleted |
-| `message_persistent` | bool | true | Whether message is persistent |
-
-### Consumer Configuration
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | false | Whether to enable the consumer |
-| `queue` | string | "lynx.queue" | Queue name |
-| `exchange` | string | "" | Exchange name to bind |
-| `routing_key` | string | "" | Routing key for binding |
-| `consumer_tag` | string | "lynx.consumer" | Consumer tag |
-| `max_concurrency` | int | 1 | Maximum processing concurrency |
-| `prefetch_count` | int | 1 | Prefetch count |
-| `name` | string | "" | Consumer instance name |
-| `queue_durable` | bool | true | Whether queue is durable |
-| `queue_auto_delete` | bool | false | Whether queue is auto-deleted |
-| `queue_exclusive` | bool | false | Whether queue is exclusive |
-| `auto_ack` | bool | false | Whether to auto-ack messages |
+Complete example: [conf/example_config.yml](./conf/example_config.yml).
 
 ## Usage
 
@@ -100,14 +85,20 @@ package main
 
 import (
     "context"
-    "github.com/go-lynx/lynx/plugins/mq/rabbitmq"
+    "log"
+
+    "github.com/go-lynx/lynx"
+    rabbitmq "github.com/go-lynx/lynx-rabbitmq"
     amqp "github.com/rabbitmq/amqp091-go"
 )
 
 func main() {
-    // Get RabbitMQ client from plugin manager
-    client := pluginManager.GetPlugin("rabbitmq").(rabbitmq.ClientInterface)
-    
+    raw := lynx.Lynx().GetPluginManager().GetPlugin("rabbitmq")
+    client, ok := raw.(rabbitmq.ClientInterface)
+    if !ok || client == nil {
+        log.Fatal("rabbitmq plugin not initialized")
+    }
+
     // Publish message
     err := client.PublishMessage(context.Background(), "test.exchange", "test.routing.key", []byte("Hello RabbitMQ"))
     if err != nil {
@@ -140,14 +131,20 @@ package main
 
 import (
     "context"
-    "github.com/go-lynx/lynx/plugins/mq/rabbitmq"
+    "log"
+
+    "github.com/go-lynx/lynx"
+    rabbitmq "github.com/go-lynx/lynx-rabbitmq"
     amqp "github.com/rabbitmq/amqp091-go"
 )
 
 func main() {
-    // Get RabbitMQ client from plugin manager
-    client := pluginManager.GetPlugin("rabbitmq").(rabbitmq.ClientInterface)
-    
+    raw := lynx.Lynx().GetPluginManager().GetPlugin("rabbitmq")
+    client, ok := raw.(rabbitmq.ClientInterface)
+    if !ok || client == nil {
+        log.Fatal("rabbitmq plugin not initialized")
+    }
+
     // Define message handler
     handler := func(ctx context.Context, msg amqp.Delivery) error {
         log.Printf("Received message: %s", string(msg.Body))
@@ -263,6 +260,10 @@ if err := client.PublishMessage(ctx, exchange, routingKey, body); err != nil {
     }
 }
 ```
+
+## Validation
+
+Current automated baseline in this workspace is `go test ./... -> [no test files]`. See [VALIDATION.md](./VALIDATION.md) for the exact output and the recommended manual smoke checks.
 
 ## Dependencies
 
