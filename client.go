@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -205,32 +206,65 @@ func normalizeRabbitMQConfig(cfg *conf.RabbitMQ) error {
 
 // StartupTasks initializes RabbitMQ client and performs health check
 func (r *RabbitMQClient) StartupTasks() error {
+	return r.startupWithContext(context.Background())
+}
+
+// CleanupTasks gracefully shuts down the plugin
+func (r *RabbitMQClient) CleanupTasks() error {
+	return r.cleanupWithContext(context.Background())
+}
+
+func (r *RabbitMQClient) startupWithContext(ctx context.Context) error {
 	log.Infof("initializing RabbitMQ client")
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("rabbitmq startup canceled before execution: %w", err)
+	}
+	r.publishRuntimeContract(false, false)
 
 	// Connect to RabbitMQ
 	if err := r.connect(); err != nil {
+		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		r.publishRuntimeContract(false, false)
+		return fmt.Errorf("rabbitmq startup canceled after connect: %w", err)
 	}
 
 	// Initialize producers
 	if err := r.initializeProducers(); err != nil {
+		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to initialize producers: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		r.publishRuntimeContract(false, false)
+		return fmt.Errorf("rabbitmq startup canceled after producer init: %w", err)
 	}
 
 	// Initialize consumers
 	if err := r.initializeConsumers(); err != nil {
+		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to initialize consumers: %w", err)
 	}
 
 	// Start health checker
-	r.healthChecker.Start()
+	if r.healthChecker != nil {
+		r.healthChecker.Start()
+	}
 
 	// Start connection manager
-	r.connectionManager.Start()
+	if r.connectionManager != nil {
+		r.connectionManager.Start()
+	}
 
 	if r.rt != nil {
 		if err := r.rt.RegisterSharedResource(pluginName, r); err != nil {
+			r.publishRuntimeContract(false, false)
 			return fmt.Errorf("failed to register RabbitMQ shared resource: %w", err)
+		}
+		r.registerRuntimePluginAlias()
+		if err := r.rt.RegisterPrivateResource("config", r.config); err != nil {
+			log.Warnf("failed to register RabbitMQ private config resource: %v", err)
 		}
 		if r.connection != nil {
 			if err := r.rt.RegisterPrivateResource("connection", r.connection); err != nil {
@@ -262,15 +296,29 @@ func (r *RabbitMQClient) StartupTasks() error {
 				log.Warnf("failed to register RabbitMQ private retry handler resource: %v", err)
 			}
 		}
+		if r.metrics != nil {
+			if err := r.rt.RegisterPrivateResource("metrics", r.metrics); err != nil {
+				log.Warnf("failed to register RabbitMQ private metrics resource: %v", err)
+			}
+		}
 	}
+
+	if err := r.CheckHealth(); err != nil {
+		r.publishRuntimeContract(false, false)
+		return err
+	}
+	r.publishRuntimeContract(true, true)
 
 	log.Infof("RabbitMQ client successfully initialized")
 	return nil
 }
 
-// CleanupTasks gracefully shuts down the plugin
-func (r *RabbitMQClient) CleanupTasks() error {
+func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("rabbitmq cleanup canceled before execution: %w", err)
+	}
 	log.Infof("shutting down RabbitMQ client plugin")
+	r.publishRuntimeContract(false, false)
 
 	// Signal background tasks to stop (protected against multiple calls)
 	r.closeOnce.Do(func() {
@@ -318,8 +366,12 @@ func (r *RabbitMQClient) CleanupTasks() error {
 	// Close connection
 	r.connectionMutex.Lock()
 	if r.connection != nil {
-		r.connection.Close()
+		if err := r.connection.Close(); err != nil {
+			r.connectionMutex.Unlock()
+			return err
+		}
 		log.Infof("RabbitMQ connection closed")
+		r.connection = nil
 	}
 	r.connectionMutex.Unlock()
 
