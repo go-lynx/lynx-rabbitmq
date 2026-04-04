@@ -1,10 +1,12 @@
 package rabbitmq
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	kratosconfig "github.com/go-kratos/kratos/v2/config"
 	"github.com/go-lynx/lynx-rabbitmq/conf"
 	"github.com/go-lynx/lynx/log"
 	"github.com/go-lynx/lynx/plugins"
@@ -35,40 +37,8 @@ type RabbitMQClient struct {
 
 // NewRabbitMQClient creates a new RabbitMQ client plugin instance
 func NewRabbitMQClient() *RabbitMQClient {
-	rabbitmqConf := &conf.RabbitMQ{
-		Urls: []string{"amqp://guest:guest@localhost:5672/"},
-		Producers: []*conf.Producer{
-			{
-				Name:            "default-producer",
-				Enabled:         true,
-				Exchange:        "lynx.exchange",
-				ExchangeType:    "direct",
-				ExchangeDurable: true,
-				PublishTimeout:  durationpb.New(3 * time.Second),
-				MaxRetries:      3,
-				RetryBackoff:    durationpb.New(100 * time.Millisecond),
-			},
-		},
-		Consumers: []*conf.Consumer{
-			{
-				Name:          "default-consumer",
-				Enabled:       true,
-				Queue:         "lynx.queue",
-				QueueDurable:  true,
-				PrefetchCount: 1,
-				AutoAck:       false,
-			},
-		},
-		Username:        "guest",
-		Password:        "guest",
-		VirtualHost:     "/",
-		DialTimeout:     durationpb.New(3 * time.Second),
-		Heartbeat:       durationpb.New(30 * time.Second),
-		ChannelPoolSize: 10,
-	}
-
 	c := &RabbitMQClient{
-		config:    rabbitmqConf,
+		config:    defaultRabbitMQConfig(),
 		producers: make(map[string]*amqp.Channel),
 		consumers: make(map[string]*amqp.Channel),
 		closeChan: make(chan struct{}),
@@ -88,6 +58,42 @@ func NewRabbitMQClient() *RabbitMQClient {
 	return c
 }
 
+func defaultRabbitMQConfig() *conf.RabbitMQ {
+	return &conf.RabbitMQ{
+		Urls: []string{"amqp://guest:guest@localhost:5672/"},
+		Producers: []*conf.Producer{
+			{
+				Name:            "default-producer",
+				Enabled:         true,
+				Exchange:        defaultExchange,
+				ExchangeType:    ExchangeTypeDirect,
+				ExchangeDurable: true,
+				PublishTimeout:  durationpb.New(3 * time.Second),
+				MaxRetries:      3,
+				RetryBackoff:    durationpb.New(100 * time.Millisecond),
+			},
+		},
+		Consumers: []*conf.Consumer{
+			{
+				Name:           "default-consumer",
+				Enabled:        true,
+				Queue:          defaultQueue,
+				QueueDurable:   true,
+				ConsumerTag:    defaultConsumer,
+				MaxConcurrency: 1,
+				PrefetchCount:  1,
+				AutoAck:        false,
+			},
+		},
+		Username:        "guest",
+		Password:        "guest",
+		VirtualHost:     defaultVirtualHost,
+		DialTimeout:     durationpb.New(3 * time.Second),
+		Heartbeat:       durationpb.New(30 * time.Second),
+		ChannelPoolSize: defaultChannelPoolSize,
+	}
+}
+
 // InitializeResources initializes the plugin with configuration
 func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
 	// Initialize base plugin
@@ -96,11 +102,103 @@ func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
 	}
 	r.rt = rt
 
+	cfg := defaultRabbitMQConfig()
+	if rt != nil && rt.GetConfig() != nil {
+		if err := rt.GetConfig().Value(confPrefix).Scan(cfg); err != nil && !errors.Is(err, kratosconfig.ErrNotFound) {
+			return fmt.Errorf("failed to scan RabbitMQ configuration: %w", err)
+		}
+	}
+	if err := normalizeRabbitMQConfig(cfg); err != nil {
+		return err
+	}
+	r.config = cfg
+
 	// Initialize managers
 	r.healthChecker = NewHealthChecker()
 	r.connectionManager = NewConnectionManager(r.config)
 	r.retryHandler = NewRetryHandler(r.config)
 	r.goroutinePool = NewGoroutinePool(10) // Default pool size
+
+	return nil
+}
+
+func normalizeRabbitMQConfig(cfg *conf.RabbitMQ) error {
+	if cfg == nil {
+		return fmt.Errorf("rabbitmq configuration is required")
+	}
+	if len(cfg.Urls) == 0 {
+		cfg.Urls = []string{"amqp://guest:guest@localhost:5672/"}
+	}
+	for i, url := range cfg.Urls {
+		if url == "" {
+			return fmt.Errorf("rabbitmq urls[%d] must not be empty", i)
+		}
+	}
+	if cfg.VirtualHost == "" {
+		cfg.VirtualHost = defaultVirtualHost
+	}
+	if cfg.DialTimeout == nil || cfg.DialTimeout.AsDuration() <= 0 {
+		cfg.DialTimeout = durationpb.New(3 * time.Second)
+	}
+	if cfg.Heartbeat == nil || cfg.Heartbeat.AsDuration() <= 0 {
+		cfg.Heartbeat = durationpb.New(30 * time.Second)
+	}
+	if cfg.ChannelPoolSize <= 0 {
+		cfg.ChannelPoolSize = defaultChannelPoolSize
+	}
+
+	for i, producer := range cfg.Producers {
+		if producer == nil {
+			return fmt.Errorf("rabbitmq producers[%d] configuration is nil", i)
+		}
+		if producer.Enabled && producer.Name == "" {
+			return fmt.Errorf("rabbitmq producers[%d].name is required when enabled", i)
+		}
+		if producer.Exchange == "" {
+			producer.Exchange = defaultExchange
+		}
+		if producer.ExchangeType == "" {
+			producer.ExchangeType = ExchangeTypeDirect
+		}
+		switch producer.ExchangeType {
+		case ExchangeTypeDirect, ExchangeTypeFanout, ExchangeTypeTopic, ExchangeTypeHeaders:
+		default:
+			return fmt.Errorf("rabbitmq producers[%d].exchange_type %q is invalid", i, producer.ExchangeType)
+		}
+		if producer.PublishTimeout == nil || producer.PublishTimeout.AsDuration() <= 0 {
+			producer.PublishTimeout = durationpb.New(3 * time.Second)
+		}
+		if producer.MaxRetries < 0 {
+			return fmt.Errorf("rabbitmq producers[%d].max_retries must be non-negative", i)
+		}
+		if producer.MaxRetries == 0 {
+			producer.MaxRetries = defaultMaxRetries
+		}
+		if producer.RetryBackoff == nil || producer.RetryBackoff.AsDuration() <= 0 {
+			producer.RetryBackoff = durationpb.New(100 * time.Millisecond)
+		}
+	}
+
+	for i, consumer := range cfg.Consumers {
+		if consumer == nil {
+			return fmt.Errorf("rabbitmq consumers[%d] configuration is nil", i)
+		}
+		if consumer.Enabled && consumer.Name == "" {
+			return fmt.Errorf("rabbitmq consumers[%d].name is required when enabled", i)
+		}
+		if consumer.Queue == "" {
+			consumer.Queue = defaultQueue
+		}
+		if consumer.ConsumerTag == "" {
+			consumer.ConsumerTag = defaultConsumer
+		}
+		if consumer.MaxConcurrency <= 0 {
+			consumer.MaxConcurrency = defaultMaxConcurrency
+		}
+		if consumer.PrefetchCount <= 0 {
+			consumer.PrefetchCount = defaultPrefetchCount
+		}
+	}
 
 	return nil
 }

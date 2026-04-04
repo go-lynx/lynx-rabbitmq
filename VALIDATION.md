@@ -5,20 +5,23 @@
 Current workspace baseline:
 
 ```bash
-go test ./...
+go test ./... -count=1
+go vet ./...
 ```
 
 Output:
 
 ```text
-?    github.com/go-lynx/lynx-rabbitmq       [no test files]
+ok   github.com/go-lynx/lynx-rabbitmq       (passes root package unit tests)
 ?    github.com/go-lynx/lynx-rabbitmq/conf  [no test files]
+go vet ./...                                (passes)
 ```
 
 ## What This Means
 
-- This module currently has no committed Go test files.
-- Publish, subscribe, retry, queue declaration, and health behavior are not covered by automated Go tests yet.
+- The root package now has committed unit tests covering default config construction, runtime config scanning, initialization-time defaulting/validation, retry behavior, metrics, and manager helpers.
+- The `conf` package is generated protobuf code and still has no standalone test files.
+- Publish, subscribe, exchange/queue declaration, and reconnect behavior are still not covered by broker-backed integration tests in this repository.
 
 ## Recommended Manual Smoke Checks
 

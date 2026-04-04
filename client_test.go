@@ -7,9 +7,59 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-kratos/kratos/v2/config"
 	"github.com/go-lynx/lynx-rabbitmq/conf"
+	"github.com/go-lynx/lynx/plugins"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
+
+type staticConfigSource struct {
+	content string
+}
+
+func (s staticConfigSource) Load() ([]*config.KeyValue, error) {
+	return []*config.KeyValue{{
+		Key:    "runtime.yaml",
+		Value:  []byte(s.content),
+		Format: "yaml",
+	}}, nil
+}
+
+func (s staticConfigSource) Watch() (config.Watcher, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &staticConfigWatcher{ctx: ctx, cancel: cancel}, nil
+}
+
+type staticConfigWatcher struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (w *staticConfigWatcher) Next() ([]*config.KeyValue, error) {
+	<-w.ctx.Done()
+	return nil, w.ctx.Err()
+}
+
+func (w *staticConfigWatcher) Stop() error {
+	w.cancel()
+	return nil
+}
+
+func newRuntimeWithConfigFile(t *testing.T, content string) plugins.Runtime {
+	t.Helper()
+
+	cfg := config.New(config.WithSource(staticConfigSource{content: content}))
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cfg.Close()
+	})
+
+	rt := plugins.NewSimpleRuntime()
+	rt.SetConfig(cfg)
+	return rt
+}
 
 func TestNewRabbitMQClientDefaults(t *testing.T) {
 	client := NewRabbitMQClient()
@@ -176,5 +226,77 @@ func TestRabbitMQMetricsAndManagers(t *testing.T) {
 	}
 	if got := len(client.GetEnabledConsumers()); got != 1 {
 		t.Fatalf("expected 1 enabled consumer after filtering, got %d", got)
+	}
+}
+
+func TestInitializeResourcesLoadsRuntimeConfig(t *testing.T) {
+	rt := newRuntimeWithConfigFile(t, `
+rabbitmq:
+  urls:
+    - "amqp://service:secret@mq:5672/"
+  producers:
+    - name: "orders-producer"
+      enabled: true
+      exchange: "orders.exchange"
+  consumers:
+    - name: "orders-consumer"
+      enabled: true
+      queue: "orders.queue"
+  virtual_host: "/orders"
+`)
+
+	client := NewRabbitMQClient()
+	if err := client.InitializeResources(rt); err != nil {
+		t.Fatalf("InitializeResources returned error: %v", err)
+	}
+
+	if got := client.config.Urls[0]; got != "amqp://service:secret@mq:5672/" {
+		t.Fatalf("unexpected url after scan: %q", got)
+	}
+	if client.config.VirtualHost != "/orders" {
+		t.Fatalf("unexpected virtual host: %q", client.config.VirtualHost)
+	}
+	if client.config.DialTimeout == nil || client.config.DialTimeout.AsDuration() != 3*time.Second {
+		t.Fatalf("expected default dial timeout, got %#v", client.config.DialTimeout)
+	}
+	if client.config.Heartbeat == nil || client.config.Heartbeat.AsDuration() != 30*time.Second {
+		t.Fatalf("expected default heartbeat, got %#v", client.config.Heartbeat)
+	}
+	if client.config.Producers[0].ExchangeType != ExchangeTypeDirect {
+		t.Fatalf("expected default exchange type, got %q", client.config.Producers[0].ExchangeType)
+	}
+	if client.config.Consumers[0].ConsumerTag != defaultConsumer {
+		t.Fatalf("expected default consumer tag, got %q", client.config.Consumers[0].ConsumerTag)
+	}
+	if client.healthChecker == nil || client.connectionManager == nil || client.retryHandler == nil || client.goroutinePool == nil {
+		t.Fatal("expected InitializeResources to build managers")
+	}
+}
+
+func TestInitializeResourcesRejectsInvalidConfig(t *testing.T) {
+	rt := newRuntimeWithConfigFile(t, `
+rabbitmq:
+  urls:
+    - ""
+`)
+
+	client := NewRabbitMQClient()
+	if err := client.InitializeResources(rt); err == nil {
+		t.Fatal("expected InitializeResources to reject empty URL entries")
+	}
+}
+
+func TestInitializeResourcesRejectsInvalidExchangeType(t *testing.T) {
+	rt := newRuntimeWithConfigFile(t, `
+rabbitmq:
+  producers:
+    - name: "orders-producer"
+      enabled: true
+      exchange_type: "invalid"
+`)
+
+	client := NewRabbitMQClient()
+	if err := client.InitializeResources(rt); err == nil {
+		t.Fatal("expected InitializeResources to reject invalid exchange_type")
 	}
 }
