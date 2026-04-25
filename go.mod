@@ -1,12 +1,13 @@
 module github.com/go-lynx/lynx-rabbitmq
 
-go 1.25
+go 1.26
 
-toolchain go1.25.3
+toolchain go1.26.2
 
 require (
+	github.com/go-kratos/kratos/v2 v2.9.2
 	github.com/go-lynx/lynx v1.6.0-beta
-	github.com/rabbitmq/amqp091-go v1.10.0
+	github.com/rabbitmq/amqp091-go v1.11.0
 	google.golang.org/protobuf v1.36.10
 )
 
@@ -15,7 +16,6 @@ require (
 	github.com/Masterminds/semver/v3 v3.2.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-kratos/aegis v0.2.0 // indirect
-	github.com/go-kratos/kratos/v2 v2.9.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-playground/form/v4 v4.3.0 // indirect

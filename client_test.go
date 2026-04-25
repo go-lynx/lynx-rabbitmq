@@ -67,7 +67,7 @@ func TestNewRabbitMQClientDefaults(t *testing.T) {
 	if client.config == nil {
 		t.Fatal("expected default config to be initialized")
 	}
-	if got := client.config.Urls; len(got) != 1 || got[0] != "amqp://guest:guest@localhost:5672/" {
+	if got := client.config.Urls; len(got) != 1 || got[0] != "amqp://localhost:5672/" {
 		t.Fatalf("unexpected default URLs: %#v", got)
 	}
 	if client.config.VirtualHost != "/" {

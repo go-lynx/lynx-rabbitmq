@@ -224,11 +224,12 @@ func (r *RetryHandler) DoWithRetry(ctx context.Context, operation func() error) 
 			break
 		}
 
-		// Wait before retry
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 
 		// Exponential backoff with max limit

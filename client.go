@@ -61,7 +61,7 @@ func NewRabbitMQClient() *RabbitMQClient {
 
 func defaultRabbitMQConfig() *conf.RabbitMQ {
 	return &conf.RabbitMQ{
-		Urls: []string{"amqp://guest:guest@localhost:5672/"},
+		Urls: []string{"amqp://localhost:5672/"},
 		Producers: []*conf.Producer{
 			{
 				Name:            "default-producer",
@@ -86,8 +86,8 @@ func defaultRabbitMQConfig() *conf.RabbitMQ {
 				AutoAck:        false,
 			},
 		},
-		Username:        "guest",
-		Password:        "guest",
+		Username:        "",
+		Password:        "",
 		VirtualHost:     defaultVirtualHost,
 		DialTimeout:     durationpb.New(3 * time.Second),
 		Heartbeat:       durationpb.New(30 * time.Second),
@@ -128,7 +128,7 @@ func normalizeRabbitMQConfig(cfg *conf.RabbitMQ) error {
 		return fmt.Errorf("rabbitmq configuration is required")
 	}
 	if len(cfg.Urls) == 0 {
-		cfg.Urls = []string{"amqp://guest:guest@localhost:5672/"}
+		cfg.Urls = []string{"amqp://localhost:5672/"}
 	}
 	for i, url := range cfg.Urls {
 		if url == "" {
