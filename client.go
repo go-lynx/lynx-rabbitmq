@@ -810,6 +810,11 @@ func (r *RabbitMQClient) subscribeWithChannel(ctx context.Context, consumerName 
 	}
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Errorf("rabbitmq consumer dispatch goroutine panic: %v", rec)
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
