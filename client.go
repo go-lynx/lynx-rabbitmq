@@ -1,9 +1,21 @@
+// Package rabbitmq provides a RabbitMQ messaging plugin for the Lynx framework.
+//
+// The plugin manages AMQP channel pools and consumers with configurable prefetch,
+// reconnect backoff, and dead-letter routing.  It collects Prometheus-compatible
+// metrics for publish/consume latency, error rates, and connection health.
+//
+// Quick start:
+//
+//	import _ "github.com/go-lynx/lynx-rabbitmq"   // registers the plugin
+//
+// Configuration key: "rabbitmq" (YAML / proto).  See conf.RabbitMQ for all fields.
 package rabbitmq
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -379,39 +391,62 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	return nil
 }
 
-// connect establishes connection to RabbitMQ
+// connect establishes an AMQP connection and registers the broker close-notify
+// channel on the ConnectionManager so automatic reconnection can be driven.
 func (r *RabbitMQClient) connect() error {
-	if len(r.config.Urls) == 0 {
-		return fmt.Errorf("no RabbitMQ URLs configured")
-	}
-
-	// Use the first URL for now (could be extended to support multiple URLs)
-	url := r.config.Urls[0]
-
-	// Build connection options
-	config := amqp.Config{
-		Vhost:     r.config.VirtualHost,
-		Heartbeat: r.config.Heartbeat.AsDuration(),
-		Locale:    "en_US",
-	}
-
-	// Set authentication if provided
-	if r.config.Username != "" && r.config.Password != "" {
-		// URL should already contain credentials, but we can set them explicitly if needed
-	}
-
-	// Connect to RabbitMQ
-	conn, err := amqp.DialConfig(url, config)
+	conn, err := r.dial()
 	if err != nil {
-		return fmt.Errorf("failed to connect to RabbitMQ at %s: %w", url, err)
+		return err
 	}
 
 	r.connectionMutex.Lock()
 	r.connection = conn
 	r.connectionMutex.Unlock()
 
-	log.Infof("connected to RabbitMQ at %s", url)
+	// Wire reconnect callback and notify channel into the manager.
+	if r.connectionManager != nil {
+		r.connectionManager.SetReconnectFunc(func() (*amqp.Connection, error) {
+			newConn, dialErr := r.dial()
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			r.connectionMutex.Lock()
+			r.connection = newConn
+			r.connectionMutex.Unlock()
+			return newConn, nil
+		})
+		notifyCh := conn.NotifyClose(make(chan *amqp.Error, 1))
+		r.connectionManager.SetConnectionNotify(notifyCh)
+	}
+
+	log.Infof("connected to RabbitMQ at %s", r.config.Urls[0])
 	return nil
+}
+
+// dial creates a single AMQP connection using the first configured URL and
+// validates the virtual host before dialling.
+func (r *RabbitMQClient) dial() (*amqp.Connection, error) {
+	if len(r.config.Urls) == 0 {
+		return nil, fmt.Errorf("no RabbitMQ URLs configured")
+	}
+
+	// Validate virtual host.
+	if err := validateVirtualHost(r.config.VirtualHost); err != nil {
+		return nil, fmt.Errorf("invalid virtual host: %w", err)
+	}
+
+	url := r.config.Urls[0]
+	cfg := amqp.Config{
+		Vhost:     r.config.VirtualHost,
+		Heartbeat: r.config.Heartbeat.AsDuration(),
+		Locale:    "en_US",
+	}
+
+	conn, err := amqp.DialConfig(url, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to RabbitMQ at %s: %w", url, err)
+	}
+	return conn, nil
 }
 
 // initializeProducers initializes all configured producers
@@ -434,27 +469,46 @@ func (r *RabbitMQClient) initializeConsumers() error {
 	return nil
 }
 
-// createProducer creates a RabbitMQ producer channel
+// createProducer creates a RabbitMQ producer channel.
+//
+// The exchange name and type are validated before any network call.
+// When a non-empty exchange is declared the channel is put into confirm mode
+// so that the broker acknowledges every published message (publisher confirms).
 func (r *RabbitMQClient) createProducer(config *conf.Producer) error {
+	// Validate exchange name before touching the network.
+	if config.Exchange != "" {
+		if err := validateExchange(config.Exchange); err != nil {
+			return fmt.Errorf("producer %s: %w", config.Name, err)
+		}
+		if err := validateExchangeType(config.ExchangeType); err != nil {
+			return fmt.Errorf("producer %s: %w", config.Name, err)
+		}
+	}
+
 	channel, err := r.connection.Channel()
 	if err != nil {
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
-	// Declare exchange if configured
+	// Declare exchange if configured.
 	if config.Exchange != "" {
-		err = channel.ExchangeDeclare(
+		if err = channel.ExchangeDeclare(
 			config.Exchange,
 			config.ExchangeType,
 			config.ExchangeDurable,
-			false, // auto-delete
+			config.ExchangeAutoDelete,
 			false, // internal
 			false, // no-wait
 			nil,   // arguments
-		)
-		if err != nil {
+		); err != nil {
 			channel.Close()
 			return fmt.Errorf("failed to declare exchange %s: %w", config.Exchange, err)
+		}
+
+		// Enable publisher confirms for reliable delivery.
+		if err = channel.Confirm(false); err != nil {
+			channel.Close()
+			return fmt.Errorf("failed to enable publisher confirms for producer %s: %w", config.Name, err)
 		}
 	}
 
@@ -462,37 +516,54 @@ func (r *RabbitMQClient) createProducer(config *conf.Producer) error {
 	r.producers[config.Name] = channel
 	r.producerMutex.Unlock()
 
-	log.Infof("producer %s created", config.Name)
+	log.Infof("producer %s created (exchange=%s, confirms=enabled)", config.Name, config.Exchange)
 	return nil
 }
 
-// createConsumer creates a RabbitMQ consumer channel
+// createConsumer creates a RabbitMQ consumer channel.
+//
+// Queue and (optional) exchange names are validated before any network call.
+// When the consumer config specifies a dead-letter exchange the queue is
+// declared with the x-dead-letter-exchange and (optionally)
+// x-dead-letter-routing-key arguments so that nack'd messages are routed to
+// the DLQ automatically.
 func (r *RabbitMQClient) createConsumer(config *conf.Consumer) error {
+	// Validate queue/exchange names before touching the network.
+	if config.Queue != "" {
+		if err := validateQueue(config.Queue); err != nil {
+			return fmt.Errorf("consumer %s: %w", config.Name, err)
+		}
+	}
+	if config.Exchange != "" {
+		if err := validateExchange(config.Exchange); err != nil {
+			return fmt.Errorf("consumer %s: %w", config.Name, err)
+		}
+	}
+
 	channel, err := r.connection.Channel()
 	if err != nil {
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
-	// Set QoS if configured
+	// Set QoS / prefetch before starting deliveries.
 	if config.PrefetchCount > 0 {
-		err = channel.Qos(int(config.PrefetchCount), 0, false)
-		if err != nil {
+		if err = channel.Qos(int(config.PrefetchCount), 0, false); err != nil {
 			channel.Close()
 			return fmt.Errorf("failed to set QoS: %w", err)
 		}
 	}
 
-	// Declare queue if configured
+	// Declare queue, attaching dead-letter arguments when a DLX is configured.
 	if config.Queue != "" {
-		_, err = channel.QueueDeclare(
+		queueArgs := buildQueueArgs(config)
+		if _, err = channel.QueueDeclare(
 			config.Queue,
 			config.QueueDurable,
-			false, // auto-delete
-			false, // exclusive
+			config.QueueAutoDelete,
+			config.QueueExclusive,
 			false, // no-wait
-			nil,   // arguments
-		)
-		if err != nil {
+			queueArgs,
+		); err != nil {
 			channel.Close()
 			return fmt.Errorf("failed to declare queue %s: %w", config.Queue, err)
 		}
@@ -502,8 +573,28 @@ func (r *RabbitMQClient) createConsumer(config *conf.Consumer) error {
 	r.consumers[config.Name] = channel
 	r.consumerMutex.Unlock()
 
-	log.Infof("consumer %s created", config.Name)
+	log.Infof("consumer %s created (queue=%s)", config.Name, config.Queue)
 	return nil
+}
+
+// buildQueueArgs constructs the AMQP table of queue arguments.
+// Currently wires up dead-letter-exchange / dead-letter-routing-key when
+// the consumer configuration carries a DLX exchange name in the Exchange field
+// together with a RoutingKey.  This follows the common convention of pairing a
+// main queue with a DLQ: set Exchange to the dead-letter exchange name.
+func buildQueueArgs(config *conf.Consumer) amqp.Table {
+	args := amqp.Table{}
+	// Use the consumer Exchange field as the dead-letter exchange when present.
+	if config.Exchange != "" {
+		args["x-dead-letter-exchange"] = config.Exchange
+		if config.RoutingKey != "" {
+			args["x-dead-letter-routing-key"] = config.RoutingKey
+		}
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	return args
 }
 
 // GetEnabledProducers returns all enabled producers
@@ -543,4 +634,253 @@ func (r *RabbitMQClient) GetConnection() *amqp.Connection {
 // IsConnected checks if the RabbitMQ client is connected
 func (r *RabbitMQClient) IsConnected() bool {
 	return !r.closed && r.connection != nil && !r.connection.IsClosed()
+}
+
+// GetMetrics returns the Metrics instance for this client.
+func (r *RabbitMQClient) GetMetrics() *Metrics {
+	return r.metrics
+}
+
+// --------------------------------------------------------------------------
+// Producer interface implementation
+// --------------------------------------------------------------------------
+
+// PublishMessage publishes body to the given exchange/routingKey using the first
+// enabled producer channel.  Additional AMQP publishing properties can be
+// supplied via opts; the first element is used if present.
+//
+// Validation is applied to exchange and routingKey before the message is sent.
+func (r *RabbitMQClient) PublishMessage(ctx context.Context, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error {
+	r.producerMutex.RLock()
+	var ch *amqp.Channel
+	for _, c := range r.producers {
+		ch = c
+		break
+	}
+	r.producerMutex.RUnlock()
+
+	if ch == nil {
+		return ErrProducerNotReady
+	}
+	return r.publishToChannel(ctx, ch, exchange, routingKey, body, opts...)
+}
+
+// PublishMessageWith is like PublishMessage but selects a specific producer
+// channel by name, allowing fine-grained routing across multiple exchanges.
+func (r *RabbitMQClient) PublishMessageWith(ctx context.Context, producerName, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error {
+	r.producerMutex.RLock()
+	ch, ok := r.producers[producerName]
+	r.producerMutex.RUnlock()
+
+	if !ok {
+		return WrapError(ErrProducerNotFound, "producer: "+producerName)
+	}
+	if ch == nil {
+		return WrapError(ErrProducerNotReady, "producer: "+producerName)
+	}
+	return r.publishToChannel(ctx, ch, exchange, routingKey, body, opts...)
+}
+
+// publishToChannel validates inputs and performs the actual AMQP publish with
+// metrics instrumentation.
+func (r *RabbitMQClient) publishToChannel(ctx context.Context, ch *amqp.Channel, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error {
+	// --- input validation (integrates utils.go helpers) ---
+	if exchange != "" {
+		if err := validateExchange(exchange); err != nil {
+			return err
+		}
+	}
+
+	if len(body) == 0 {
+		return ErrEmptyMessage
+	}
+
+	// --- build publishing ---
+	pub := amqp.Publishing{
+		ContentType:  "application/octet-stream",
+		DeliveryMode: amqp.Persistent,
+		Timestamp:    time.Now(),
+		Body:         body,
+	}
+	if len(opts) > 0 {
+		pub = opts[0]
+		pub.Body = body
+		if pub.Timestamp.IsZero() {
+			pub.Timestamp = time.Now()
+		}
+	}
+
+	start := time.Now()
+	err := ch.PublishWithContext(ctx, exchange, routingKey, false, false, pub)
+	if r.metrics != nil {
+		r.metrics.RecordProducerLatency(time.Since(start))
+		if err != nil {
+			r.metrics.IncrementProducerMessagesFailed()
+		} else {
+			r.metrics.IncrementProducerMessagesSent()
+		}
+	}
+	if err != nil {
+		return WrapError(ErrPublishMessageFailed, err.Error())
+	}
+	return nil
+}
+
+// GetProducer returns the underlying AMQP channel for the named producer.
+// The caller must not close the channel directly.
+func (r *RabbitMQClient) GetProducer(name string) (*amqp.Channel, error) {
+	r.producerMutex.RLock()
+	ch, ok := r.producers[name]
+	r.producerMutex.RUnlock()
+	if !ok {
+		return nil, WrapError(ErrProducerNotFound, "producer: "+name)
+	}
+	return ch, nil
+}
+
+// IsProducerReady reports whether the named producer channel is registered and non-nil.
+func (r *RabbitMQClient) IsProducerReady(name string) bool {
+	r.producerMutex.RLock()
+	ch, ok := r.producers[name]
+	r.producerMutex.RUnlock()
+	return ok && ch != nil
+}
+
+// --------------------------------------------------------------------------
+// Consumer interface implementation
+// --------------------------------------------------------------------------
+
+// Subscribe starts consuming from queue using the first enabled consumer channel.
+// The handler is called in a separate goroutine for each message; panics in
+// the handler are recovered and counted in metrics.
+func (r *RabbitMQClient) Subscribe(ctx context.Context, queue string, handler MessageHandler) error {
+	r.consumerMutex.RLock()
+	var (
+		ch   *amqp.Channel
+		name string
+	)
+	for n, c := range r.consumers {
+		ch = c
+		name = n
+		break
+	}
+	r.consumerMutex.RUnlock()
+
+	if ch == nil {
+		return ErrConsumerNotReady
+	}
+	return r.subscribeWithChannel(ctx, name, ch, queue, handler)
+}
+
+// SubscribeWith starts consuming using a named consumer channel.
+func (r *RabbitMQClient) SubscribeWith(ctx context.Context, consumerName, queue string, handler MessageHandler) error {
+	// --- input validation ---
+	if err := validateQueue(queue); err != nil {
+		return err
+	}
+
+	r.consumerMutex.RLock()
+	ch, ok := r.consumers[consumerName]
+	r.consumerMutex.RUnlock()
+
+	if !ok {
+		return WrapError(ErrConsumerNotFound, "consumer: "+consumerName)
+	}
+	if ch == nil {
+		return WrapError(ErrConsumerNotReady, "consumer: "+consumerName)
+	}
+	return r.subscribeWithChannel(ctx, consumerName, ch, queue, handler)
+}
+
+// subscribeWithChannel wires up the AMQP delivery channel and dispatches each
+// message through the handler with panic recovery.
+func (r *RabbitMQClient) subscribeWithChannel(ctx context.Context, consumerName string, ch *amqp.Channel, queue string, handler MessageHandler) error {
+	// Locate consumer config to read AutoAck setting.
+	var autoAck bool
+	for _, c := range r.config.Consumers {
+		if c.Name == consumerName {
+			autoAck = c.AutoAck
+			break
+		}
+	}
+
+	deliveries, err := ch.ConsumeWithContext(ctx, queue, consumerName, autoAck, false, false, false, nil)
+	if err != nil {
+		return WrapError(ErrSubscribeFailed, err.Error())
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case d, ok := <-deliveries:
+				if !ok {
+					return
+				}
+				r.dispatchDelivery(ctx, d, handler, autoAck)
+			}
+		}
+	}()
+	return nil
+}
+
+// dispatchDelivery calls the user handler, recovering from panics and
+// nack-ing the message on any error so it can be routed to a dead-letter queue.
+func (r *RabbitMQClient) dispatchDelivery(ctx context.Context, d amqp.Delivery, handler MessageHandler, autoAck bool) {
+	start := time.Now()
+	var handlerErr error
+
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				handlerErr = fmt.Errorf("handler panic: %v\n%s", rec, debug.Stack())
+				log.Errorf("RabbitMQ consumer panic recovered: %v", rec)
+			}
+		}()
+		handlerErr = handler(ctx, d)
+	}()
+
+	if r.metrics != nil {
+		r.metrics.RecordConsumerLatency(time.Since(start))
+		if handlerErr != nil {
+			r.metrics.IncrementConsumerMessagesFailed()
+		} else {
+			r.metrics.IncrementConsumerMessagesReceived()
+		}
+	}
+
+	if autoAck {
+		return // broker already acked for us
+	}
+	if handlerErr != nil {
+		// requeue=false: let the broker route to DLQ if configured
+		if nackErr := d.Nack(false, false); nackErr != nil {
+			log.Warnf("RabbitMQ nack failed: %v", nackErr)
+		}
+	} else {
+		if ackErr := d.Ack(false); ackErr != nil {
+			log.Warnf("RabbitMQ ack failed: %v", ackErr)
+		}
+	}
+}
+
+// GetConsumer returns the underlying AMQP channel for the named consumer.
+// The caller must not close the channel directly.
+func (r *RabbitMQClient) GetConsumer(name string) (*amqp.Channel, error) {
+	r.consumerMutex.RLock()
+	ch, ok := r.consumers[name]
+	r.consumerMutex.RUnlock()
+	if !ok {
+		return nil, WrapError(ErrConsumerNotFound, "consumer: "+name)
+	}
+	return ch, nil
+}
+
+// IsConsumerReady reports whether the named consumer channel is registered and non-nil.
+func (r *RabbitMQClient) IsConsumerReady(name string) bool {
+	r.consumerMutex.RLock()
+	ch, ok := r.consumers[name]
+	r.consumerMutex.RUnlock()
+	return ok && ch != nil
 }

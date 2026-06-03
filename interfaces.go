@@ -1,3 +1,5 @@
+// Package rabbitmq declares the core interfaces that the RabbitMQ plugin exposes
+// to application code.
 package rabbitmq
 
 import (
@@ -8,113 +10,114 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// MessageHandler defines the message processing function
+// MessageHandler is the function signature that consumer callbacks must implement.
+// A non-nil error causes the message to be nack'd; a nil error causes an ack.
 type MessageHandler func(ctx context.Context, msg amqp.Delivery) error
 
-// Producer RabbitMQ producer interface
+// Producer is the interface for sending messages to RabbitMQ exchanges.
 type Producer interface {
-	// PublishMessage publishes a message to the specified exchange
+	// PublishMessage publishes body to the default (first) producer's exchange.
 	PublishMessage(ctx context.Context, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error
 
-	// PublishMessageWith publishes a message by producer instance name
+	// PublishMessageWith selects a named producer channel before publishing.
 	PublishMessageWith(ctx context.Context, producerName, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error
 
-	// GetProducer gets the underlying producer channel
+	// GetProducer returns the underlying AMQP channel for the named producer.
 	GetProducer(name string) (*amqp.Channel, error)
 
-	// IsProducerReady checks if the producer is ready
+	// IsProducerReady reports whether the named producer channel is live.
 	IsProducerReady(name string) bool
 }
 
-// Consumer RabbitMQ consumer interface
+// Consumer is the interface for receiving messages from RabbitMQ queues.
 type Consumer interface {
-	// Subscribe subscribes to a queue and sets message handler
+	// Subscribe starts consuming from queue using the default consumer channel.
 	Subscribe(ctx context.Context, queue string, handler MessageHandler) error
 
-	// SubscribeWith subscribes by consumer instance name
+	// SubscribeWith starts consuming using a named consumer channel.
 	SubscribeWith(ctx context.Context, consumerName, queue string, handler MessageHandler) error
 
-	// GetConsumer gets the underlying consumer channel
+	// GetConsumer returns the underlying AMQP channel for the named consumer.
 	GetConsumer(name string) (*amqp.Channel, error)
 
-	// IsConsumerReady checks if the consumer is ready
+	// IsConsumerReady reports whether the named consumer channel is live.
 	IsConsumerReady(name string) bool
 }
 
-// ClientInterface RabbitMQ client interface
+// ClientInterface is the full public interface of the RabbitMQ plugin.
 type ClientInterface interface {
 	Producer
 	Consumer
 
-	// InitializeResources initializes resources
+	// InitializeResources wires up configuration and sub-managers.
 	InitializeResources(rt plugins.Runtime) error
 
-	// StartupTasks startup tasks
+	// StartupTasks connects to the broker and starts all producers/consumers.
 	StartupTasks() error
 
-	// ShutdownTasks shutdown tasks
+	// ShutdownTasks gracefully closes all channels and the connection.
 	ShutdownTasks() error
 
-	// GetMetrics gets monitoring metrics
+	// GetMetrics returns the live metrics instance.
 	GetMetrics() *Metrics
 }
 
-// MetricsProvider monitoring metrics provider interface
+// MetricsProvider is a read-only view of plugin metrics.
 type MetricsProvider interface {
-	// GetStats gets statistics
-	GetStats() map[string]interface{}
+	// GetStats returns a snapshot of all counters and timestamps.
+	GetStats() map[string]any
 
-	// Reset resets metrics
+	// Reset zeroes all counters.
 	Reset()
 }
 
-// HealthCheckerInterface health checker interface
+// HealthCheckerInterface is the contract for the periodic liveness probe.
 type HealthCheckerInterface interface {
-	// Start starts health check
+	// Start launches the background check goroutine.
 	Start()
 
-	// Stop stops health check
+	// Stop terminates the background check goroutine.
 	Stop()
 
-	// IsHealthy checks if healthy
+	// IsHealthy returns true when the last check succeeded.
 	IsHealthy() bool
 
-	// GetLastCheck gets last check time
+	// GetLastCheck returns the timestamp of the most recent check.
 	GetLastCheck() time.Time
 
-	// GetErrorCount gets error count
+	// GetErrorCount returns the cumulative number of failed checks.
 	GetErrorCount() int
 }
 
-// ConnectionManagerInterface connection manager interface
+// ConnectionManagerInterface is the contract for connection lifecycle management.
 type ConnectionManagerInterface interface {
-	// Start starts connection manager
+	// Start marks the connection as live and begins watching for disconnects.
 	Start()
 
-	// Stop stops connection manager
+	// Stop terminates the watcher and marks the connection closed.
 	Stop()
 
-	// IsConnected checks if connected
+	// IsConnected returns true when the manager believes the connection is live.
 	IsConnected() bool
 
-	// GetHealthChecker gets health checker
+	// GetHealthChecker returns the associated health checker, if any.
 	GetHealthChecker() HealthCheckerInterface
 
-	// ForceReconnect forces reconnection
+	// ForceReconnect synchronously re-dials the broker.
 	ForceReconnect()
 }
 
-// RetryHandlerInterface retry handler interface
+// RetryHandlerInterface executes operations with configurable retry back-off.
 type RetryHandlerInterface interface {
-	// DoWithRetry executes operation with retry
+	// DoWithRetry runs operation, retrying on failure up to the configured maximum.
 	DoWithRetry(ctx context.Context, operation func() error) error
 }
 
-// GoroutinePoolInterface goroutine pool interface
+// GoroutinePoolInterface manages a bounded pool of reusable goroutines.
 type GoroutinePoolInterface interface {
-	// Submit submits task
+	// Submit enqueues a task for execution in the pool.
 	Submit(task func())
 
-	// Wait waits for completion
+	// Wait closes the pool and blocks until all tasks have finished.
 	Wait()
 }

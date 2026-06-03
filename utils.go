@@ -1,3 +1,4 @@
+// Package rabbitmq provides validation helpers and AMQP URL construction utilities.
 package rabbitmq
 
 import (
@@ -5,51 +6,46 @@ import (
 	"time"
 )
 
-// validateExchange validates exchange name
+// invalidNameChars lists characters that are not permitted in RabbitMQ resource names
+// (exchanges, queues, virtual hosts).
+var invalidNameChars = []string{"%", "&", "*", "+", "/", "\\", ":", "|", "<", ">", "?", " "}
+
+// validateExchange returns an error if the exchange name is empty, too long, or contains
+// characters that RabbitMQ rejects.
 func validateExchange(exchange string) error {
 	if exchange == "" {
 		return ErrEmptyExchange
 	}
-
-	// Basic validation for RabbitMQ exchange naming
 	if len(exchange) > 255 {
 		return WrapError(ErrInvalidExchange, "exchange name too long")
 	}
-
-	// Check for invalid characters
-	invalidChars := []string{"%", "&", "*", "+", "/", "\\", ":", "|", "<", ">", "?", " "}
-	for _, char := range invalidChars {
+	for _, char := range invalidNameChars {
 		if strings.Contains(exchange, char) {
 			return WrapError(ErrInvalidExchange, "exchange contains invalid character: "+char)
 		}
 	}
-
 	return nil
 }
 
-// validateQueue validates queue name
+// validateQueue returns an error if the queue name is empty, too long, or contains
+// characters that RabbitMQ rejects.
 func validateQueue(queue string) error {
 	if queue == "" {
 		return ErrEmptyQueue
 	}
-
-	// Basic validation for RabbitMQ queue naming
 	if len(queue) > 255 {
 		return WrapError(ErrInvalidQueue, "queue name too long")
 	}
-
-	// Check for invalid characters
-	invalidChars := []string{"%", "&", "*", "+", "/", "\\", ":", "|", "<", ">", "?", " "}
-	for _, char := range invalidChars {
+	for _, char := range invalidNameChars {
 		if strings.Contains(queue, char) {
 			return WrapError(ErrInvalidQueue, "queue contains invalid character: "+char)
 		}
 	}
-
 	return nil
 }
 
-// validateExchangeType validates exchange type
+// validateExchangeType returns an error if the exchange type is not one of the four
+// standard AMQP exchange types: direct, fanout, topic, headers.
 func validateExchangeType(exchangeType string) error {
 	switch exchangeType {
 	case ExchangeTypeDirect, ExchangeTypeFanout, ExchangeTypeTopic, ExchangeTypeHeaders:
@@ -59,56 +55,44 @@ func validateExchangeType(exchangeType string) error {
 	}
 }
 
-// validateVirtualHost validates virtual host
+// invalidVHostChars lists characters that are not permitted in RabbitMQ virtual
+// host names.  Unlike exchange/queue names, "/" is the standard default virtual
+// host and must be allowed.
+var invalidVHostChars = []string{"%", "&", "*", "+", "\\", ":", "|", "<", ">", "?", " "}
+
+// validateVirtualHost returns an error if the virtual host name is empty, too long, or
+// contains characters that RabbitMQ rejects.  The "/" character is explicitly
+// permitted because it is the standard default virtual host.
 func validateVirtualHost(vhost string) error {
 	if vhost == "" {
 		return ErrInvalidVirtualHost
 	}
-
-	// Basic validation for RabbitMQ virtual host naming
 	if len(vhost) > 255 {
 		return WrapError(ErrInvalidVirtualHost, "virtual host name too long")
 	}
-
-	// Check for invalid characters
-	invalidChars := []string{"%", "&", "*", "+", "/", "\\", ":", "|", "<", ">", "?", " "}
-	for _, char := range invalidChars {
+	for _, char := range invalidVHostChars {
 		if strings.Contains(vhost, char) {
 			return WrapError(ErrInvalidVirtualHost, "virtual host contains invalid character: "+char)
 		}
 	}
-
 	return nil
 }
 
-// parseDuration parses duration string with default fallback
+// parseDuration parses a duration string and returns defaultDuration on any error or if
+// the input string is empty.
 func parseDuration(durationStr string, defaultDuration time.Duration) time.Duration {
 	if durationStr == "" {
 		return defaultDuration
 	}
-
-	duration, err := time.ParseDuration(durationStr)
+	d, err := time.ParseDuration(durationStr)
 	if err != nil {
 		return defaultDuration
 	}
-
-	return duration
+	return d
 }
 
-// isHealthy checks if the service is healthy based on error count and last check time
-func isHealthy(errorCount int64, lastCheck time.Time, maxErrors int64, maxAge time.Duration) bool {
-	if errorCount > maxErrors {
-		return false
-	}
-
-	if time.Since(lastCheck) > maxAge {
-		return false
-	}
-
-	return true
-}
-
-// buildAMQPURL builds AMQP URL from components
+// buildAMQPURL constructs an amqp:// URL from its individual components.  Empty
+// components fall back to the standard RabbitMQ defaults (guest/guest, localhost:5672, /).
 func buildAMQPURL(username, password, host, port, vhost string) string {
 	if username == "" {
 		username = "guest"
@@ -125,6 +109,5 @@ func buildAMQPURL(username, password, host, port, vhost string) string {
 	if vhost == "" {
 		vhost = "/"
 	}
-
 	return "amqp://" + username + ":" + password + "@" + host + ":" + port + "/" + vhost
 }

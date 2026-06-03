@@ -1,3 +1,5 @@
+// Package rabbitmq provides in-process counters and gauges for RabbitMQ
+// operations, plus a Prometheus-compatible text exposition method.
 package rabbitmq
 
 import (
@@ -8,7 +10,9 @@ import (
 	"time"
 )
 
-// Metrics represents RabbitMQ metrics
+// Metrics accumulates counters and latency gauges for RabbitMQ publish/consume
+// operations and connection lifecycle events.  All counter fields are updated
+// atomically; timestamp fields are guarded by mu.
 type Metrics struct {
 	mu sync.RWMutex
 
@@ -110,28 +114,28 @@ func (m *Metrics) UpdateLastHealthCheck() {
 	m.mu.Unlock()
 }
 
-// GetStats returns all metrics as a map
-func (m *Metrics) GetStats() map[string]interface{} {
+// GetStats returns a snapshot of all metrics keyed by category and metric name.
+func (m *Metrics) GetStats() map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return map[string]interface{}{
-		"producer": map[string]interface{}{
+	return map[string]any{
+		"producer": map[string]any{
 			"messages_sent":   atomic.LoadInt64(&m.producerMessagesSent),
 			"messages_failed": atomic.LoadInt64(&m.producerMessagesFailed),
 			"latency_ns":      atomic.LoadInt64(&m.producerLatency),
 		},
-		"consumer": map[string]interface{}{
+		"consumer": map[string]any{
 			"messages_received": atomic.LoadInt64(&m.consumerMessagesReceived),
 			"messages_failed":   atomic.LoadInt64(&m.consumerMessagesFailed),
 			"latency_ns":        atomic.LoadInt64(&m.consumerLatency),
 		},
-		"connection": map[string]interface{}{
+		"connection": map[string]any{
 			"errors":             atomic.LoadInt64(&m.connectionErrors),
 			"reconnection_count": atomic.LoadInt64(&m.reconnectionCount),
 			"last_reconnect":     m.lastReconnectTime,
 		},
-		"health": map[string]interface{}{
+		"health": map[string]any{
 			"check_count":  atomic.LoadInt64(&m.healthCheckCount),
 			"check_errors": atomic.LoadInt64(&m.healthCheckErrors),
 			"last_check":   m.lastHealthCheck,
