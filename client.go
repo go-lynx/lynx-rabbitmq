@@ -13,10 +13,14 @@ package rabbitmq
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net/url"
 	"runtime/debug"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kratosconfig "github.com/go-kratos/kratos/v2/config"
@@ -40,12 +44,28 @@ type RabbitMQClient struct {
 	connectionMutex   sync.RWMutex
 	closeChan         chan struct{}
 	closeOnce         sync.Once // Protect against multiple close operations
-	closed            bool
+	closed            atomic.Bool
 	metrics           *Metrics
 	healthChecker     *HealthChecker
 	connectionManager *ConnectionManager
 	retryHandler      *RetryHandler
 	goroutinePool     *GoroutinePool
+
+	// subscriptionWG tracks Subscribe dispatch goroutines so they can be
+	// drained before the underlying channels are closed on shutdown.
+	subscriptionWG sync.WaitGroup
+	// subscriptions records active subscriptions so they can be re-established
+	// after a reconnect rebuilds the consumer channels.
+	subscriptions  []*subscription
+	subscriptionMu sync.Mutex
+}
+
+// subscription captures the parameters of an active Subscribe call so the
+// dispatch loop can be restarted after a reconnect.
+type subscription struct {
+	consumerName string
+	queue        string
+	handler      MessageHandler
 }
 
 // NewRabbitMQClient creates a new RabbitMQ client plugin instance
@@ -55,7 +75,6 @@ func NewRabbitMQClient() *RabbitMQClient {
 		producers: make(map[string]*amqp.Channel),
 		consumers: make(map[string]*amqp.Channel),
 		closeChan: make(chan struct{}),
-		closed:    false,
 		metrics:   &Metrics{},
 	}
 
@@ -259,8 +278,9 @@ func (r *RabbitMQClient) startupWithContext(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize consumers: %w", err)
 	}
 
-	// Start health checker
+	// Start health checker with a real connection probe.
 	if r.healthChecker != nil {
+		r.healthChecker.SetProbe(r.connectionProbe)
 		r.healthChecker.Start()
 	}
 
@@ -333,10 +353,10 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	r.publishRuntimeContract(false, false)
 
 	// Signal background tasks to stop (protected against multiple calls)
+	r.closed.Store(true)
 	r.closeOnce.Do(func() {
 		close(r.closeChan)
 	})
-	r.closed = true
 
 	// Stop health checker
 	if r.healthChecker != nil {
@@ -347,6 +367,10 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	if r.connectionManager != nil {
 		r.connectionManager.Stop()
 	}
+
+	// Drain Subscribe dispatch goroutines before closing their channels so we
+	// never Ack/Nack on a channel that is being torn down underneath them.
+	r.subscriptionWG.Wait()
 
 	// Stop goroutine pool
 	if r.goroutinePool != nil {
@@ -413,6 +437,13 @@ func (r *RabbitMQClient) connect() error {
 			r.connectionMutex.Lock()
 			r.connection = newConn
 			r.connectionMutex.Unlock()
+			// Re-create producer/consumer channels (and re-declare
+			// exchanges/queues/QoS/confirms) on the fresh connection and
+			// restart the Subscribe loops; the old channels were bound to
+			// the now-closed connection and are permanently dead.
+			if rebuildErr := r.rebuildAfterReconnect(); rebuildErr != nil {
+				return nil, rebuildErr
+			}
 			return newConn, nil
 		})
 		notifyCh := conn.NotifyClose(make(chan *amqp.Error, 1))
@@ -420,6 +451,76 @@ func (r *RabbitMQClient) connect() error {
 	}
 
 	log.Infof("connected to RabbitMQ at %s", r.config.Urls[0])
+	return nil
+}
+
+// rebuildAfterReconnect re-creates all producer and consumer channels on the
+// current (freshly re-dialed) connection and restarts any active Subscribe
+// loops.  It is invoked from the reconnect callback after r.connection has been
+// replaced; if it fails the reconnect is treated as unsuccessful so the manager
+// keeps retrying.
+func (r *RabbitMQClient) rebuildAfterReconnect() error {
+	// Discard the stale producer channels (they are bound to the closed
+	// connection) before re-creating them.
+	r.producerMutex.Lock()
+	r.producers = make(map[string]*amqp.Channel)
+	r.producerMutex.Unlock()
+
+	r.consumerMutex.Lock()
+	r.consumers = make(map[string]*amqp.Channel)
+	r.consumerMutex.Unlock()
+
+	if err := r.initializeProducers(); err != nil {
+		return fmt.Errorf("reconnect: failed to rebuild producers: %w", err)
+	}
+	if err := r.initializeConsumers(); err != nil {
+		return fmt.Errorf("reconnect: failed to rebuild consumers: %w", err)
+	}
+
+	// Restart the dispatch loops for every previously active subscription.
+	r.subscriptionMu.Lock()
+	subs := make([]*subscription, len(r.subscriptions))
+	copy(subs, r.subscriptions)
+	r.subscriptionMu.Unlock()
+
+	for _, sub := range subs {
+		r.consumerMutex.RLock()
+		ch := r.consumers[sub.consumerName]
+		r.consumerMutex.RUnlock()
+		if ch == nil {
+			continue
+		}
+		if err := r.startDispatchLoop(context.Background(), sub.consumerName, ch, sub.queue, sub.handler); err != nil {
+			return fmt.Errorf("reconnect: failed to restart subscription %s: %w", sub.consumerName, err)
+		}
+	}
+
+	log.Infof("RabbitMQ channels and subscriptions rebuilt after reconnect")
+	return nil
+}
+
+// connectionProbe is wired into the HealthChecker as its liveness probe.  It
+// opens a temporary channel on the live connection so disconnects are reflected
+// in the health state rather than always reporting healthy.
+func (r *RabbitMQClient) connectionProbe() error {
+	if r.closed.Load() {
+		return fmt.Errorf("rabbitmq client is closed")
+	}
+	r.connectionMutex.RLock()
+	conn := r.connection
+	r.connectionMutex.RUnlock()
+
+	if conn == nil {
+		return fmt.Errorf("rabbitmq connection not initialized")
+	}
+	if conn.IsClosed() {
+		return fmt.Errorf("rabbitmq connection is closed")
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("rabbitmq health probe failed to open channel: %w", err)
+	}
+	_ = ch.Close()
 	return nil
 }
 
@@ -435,18 +536,52 @@ func (r *RabbitMQClient) dial() (*amqp.Connection, error) {
 		return nil, fmt.Errorf("invalid virtual host: %w", err)
 	}
 
-	url := r.config.Urls[0]
+	dialURL := r.buildDialURL(r.config.Urls[0])
 	cfg := amqp.Config{
 		Vhost:     r.config.VirtualHost,
 		Heartbeat: r.config.Heartbeat.AsDuration(),
 		Locale:    "en_US",
+		// Apply the configured dial timeout so a hung broker cannot block
+		// startup indefinitely.
+		Dial: amqp.DefaultDial(r.config.DialTimeout.AsDuration()),
 	}
 
-	conn, err := amqp.DialConfig(url, cfg)
+	// Attach a TLS client config when the URL uses the amqps scheme so the
+	// handshake can proceed over TLS.
+	if strings.HasPrefix(strings.ToLower(dialURL), "amqps://") {
+		cfg.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	conn, err := amqp.DialConfig(dialURL, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to RabbitMQ at %s: %w", url, err)
+		return nil, fmt.Errorf("failed to connect to RabbitMQ at %s: %w", r.config.Urls[0], err)
 	}
 	return conn, nil
+}
+
+// buildDialURL augments the configured URL with credentials and virtual host
+// from the configuration when they are not already present in the URL.  If the
+// URL cannot be parsed it is returned unchanged so amqp.DialConfig can surface
+// the underlying error.
+func (r *RabbitMQClient) buildDialURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	// Apply credentials from configuration when the URL omits userinfo.
+	if u.User == nil || u.User.Username() == "" {
+		if r.config.Username != "" {
+			u.User = url.UserPassword(r.config.Username, r.config.Password)
+		}
+	}
+
+	// Apply the configured virtual host when the URL carries no explicit path.
+	if (u.Path == "" || u.Path == "/") && r.config.VirtualHost != "" && r.config.VirtualHost != "/" {
+		u.Path = "/" + strings.TrimPrefix(r.config.VirtualHost, "/")
+	}
+
+	return u.String()
 }
 
 // initializeProducers initializes all configured producers
@@ -633,7 +768,13 @@ func (r *RabbitMQClient) GetConnection() *amqp.Connection {
 
 // IsConnected checks if the RabbitMQ client is connected
 func (r *RabbitMQClient) IsConnected() bool {
-	return !r.closed && r.connection != nil && !r.connection.IsClosed()
+	if r.closed.Load() {
+		return false
+	}
+	r.connectionMutex.RLock()
+	conn := r.connection
+	r.connectionMutex.RUnlock()
+	return conn != nil && !conn.IsClosed()
 }
 
 // GetMetrics returns the Metrics instance for this client.
@@ -792,24 +933,74 @@ func (r *RabbitMQClient) SubscribeWith(ctx context.Context, consumerName, queue 
 	return r.subscribeWithChannel(ctx, consumerName, ch, queue, handler)
 }
 
-// subscribeWithChannel wires up the AMQP delivery channel and dispatches each
-// message through the handler with panic recovery.
-func (r *RabbitMQClient) subscribeWithChannel(ctx context.Context, consumerName string, ch *amqp.Channel, queue string, handler MessageHandler) error {
-	// Locate consumer config to read AutoAck setting.
-	var autoAck bool
+// subscribeWithChannel records the subscription so it can be re-established
+// after a reconnect, then starts the dispatch loop on a dedicated channel.
+//
+// The shared consumer channel registered in r.consumers is intentionally NOT
+// used for deliveries: amqp091 channels are not goroutine-safe, so each
+// subscription gets its own channel (channel-per-goroutine) to avoid racing
+// Ack/Nack against publishes or QoS calls on a shared channel.
+func (r *RabbitMQClient) subscribeWithChannel(ctx context.Context, consumerName string, _ *amqp.Channel, queue string, handler MessageHandler) error {
+	// Remember the subscription for reconnect-time restarts.
+	r.subscriptionMu.Lock()
+	r.subscriptions = append(r.subscriptions, &subscription{
+		consumerName: consumerName,
+		queue:        queue,
+		handler:      handler,
+	})
+	r.subscriptionMu.Unlock()
+
+	return r.startDispatchLoop(ctx, consumerName, nil, queue, handler)
+}
+
+// startDispatchLoop opens a dedicated AMQP channel for this subscription,
+// applies the consumer's QoS, begins consuming, and runs the delivery loop in a
+// WaitGroup-tracked goroutine whose lifetime is bound to closeChan so it drains
+// cleanly on shutdown.  The _ shared channel parameter is accepted for symmetry
+// with callers but is never used for deliveries (see subscribeWithChannel).
+func (r *RabbitMQClient) startDispatchLoop(ctx context.Context, consumerName string, _ *amqp.Channel, queue string, handler MessageHandler) error {
+	// Locate consumer config to read AutoAck / PrefetchCount settings.
+	var (
+		autoAck       bool
+		prefetchCount int32
+	)
 	for _, c := range r.config.Consumers {
 		if c.Name == consumerName {
 			autoAck = c.AutoAck
+			prefetchCount = c.PrefetchCount
 			break
+		}
+	}
+
+	// Open a dedicated channel for this subscription on the live connection.
+	r.connectionMutex.RLock()
+	conn := r.connection
+	r.connectionMutex.RUnlock()
+	if conn == nil || conn.IsClosed() {
+		return ErrConsumerNotReady
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return WrapError(ErrSubscribeFailed, err.Error())
+	}
+
+	if prefetchCount > 0 {
+		if err = ch.Qos(int(prefetchCount), 0, false); err != nil {
+			ch.Close()
+			return WrapError(ErrSubscribeFailed, err.Error())
 		}
 	}
 
 	deliveries, err := ch.ConsumeWithContext(ctx, queue, consumerName, autoAck, false, false, false, nil)
 	if err != nil {
+		ch.Close()
 		return WrapError(ErrSubscribeFailed, err.Error())
 	}
 
+	r.subscriptionWG.Add(1)
 	go func() {
+		defer r.subscriptionWG.Done()
+		defer ch.Close()
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Errorf("rabbitmq consumer dispatch goroutine panic: %v", rec)
@@ -818,6 +1009,10 @@ func (r *RabbitMQClient) subscribeWithChannel(ctx context.Context, consumerName 
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-r.closeChan:
+				// Plugin is shutting down — stop before Ack/Nack on a
+				// channel that is about to be torn down.
 				return
 			case d, ok := <-deliveries:
 				if !ok {
