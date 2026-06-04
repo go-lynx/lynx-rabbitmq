@@ -24,6 +24,9 @@ type HealthChecker struct {
 	lastError  error
 	mu         sync.RWMutex
 	stopped    bool
+	// probe, when set, performs the actual connection liveness check and
+	// returns a non-nil error when the broker is unreachable.
+	probe func() error
 }
 
 // NewHealthChecker returns a HealthChecker that fires every 30 seconds by default.
@@ -33,6 +36,14 @@ func NewHealthChecker() *HealthChecker {
 		stopChan: make(chan struct{}),
 		healthy:  true,
 	}
+}
+
+// SetProbe registers the liveness probe invoked on every tick.  fn should
+// return a non-nil error when the broker connection is unhealthy.
+func (h *HealthChecker) SetProbe(fn func() error) {
+	h.mu.Lock()
+	h.probe = fn
+	h.mu.Unlock()
 }
 
 // Start launches the background health-check goroutine.
@@ -99,14 +110,30 @@ func (h *HealthChecker) run() {
 	}
 }
 
-// performHealthCheck records a successful health check timestamp.
-// External callers (e.g. the client's CheckHealth) drive the actual
-// connection probe; this resets the basic liveness marker.
+// performHealthCheck runs the registered liveness probe (if any) and records
+// the result.  When no probe is registered it falls back to marking the
+// checker healthy so that callers without a wired connection still observe a
+// fresh timestamp.
 func (h *HealthChecker) performHealthCheck() {
+	h.mu.RLock()
+	probe := h.probe
+	h.mu.RUnlock()
+
+	var probeErr error
+	if probe != nil {
+		probeErr = probe()
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.lastCheck = time.Now()
+	if probeErr != nil {
+		h.healthy = false
+		h.lastError = probeErr
+		h.errorCount++
+		return
+	}
 	h.healthy = true
 	h.lastError = nil
 }
@@ -122,14 +149,14 @@ type reconnectFunc func() (*amqp.Connection, error)
 // ConnectionManager monitors the AMQP connection, signals disconnects, and
 // drives reconnection via a caller-supplied callback.
 type ConnectionManager struct {
-	config       *conf.RabbitMQ
-	connected    bool
-	stopChan     chan struct{}
-	stopOnce     sync.Once
-	mu           sync.RWMutex
-	stopped      bool
-	reconnect    reconnectFunc   // nil when reconnect is not wired up
-	connNotify   chan *amqp.Error // receives broker-side close notifications
+	config     *conf.RabbitMQ
+	connected  bool
+	stopChan   chan struct{}
+	stopOnce   sync.Once
+	mu         sync.RWMutex
+	stopped    bool
+	reconnect  reconnectFunc    // nil when reconnect is not wired up
+	connNotify chan *amqp.Error // receives broker-side close notifications
 }
 
 // NewConnectionManager returns a ConnectionManager for the given configuration.

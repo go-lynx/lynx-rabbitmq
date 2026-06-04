@@ -4,10 +4,14 @@ import "fmt"
 
 // CheckHealth verifies that the RabbitMQ client has established its core runtime state.
 func (r *RabbitMQClient) CheckHealth() error {
-	if r.connection == nil {
+	r.connectionMutex.RLock()
+	conn := r.connection
+	r.connectionMutex.RUnlock()
+
+	if conn == nil {
 		return fmt.Errorf("rabbitmq connection not initialized")
 	}
-	if r.connection.IsClosed() {
+	if conn.IsClosed() {
 		return fmt.Errorf("rabbitmq connection is closed")
 	}
 	if r.connectionManager == nil {
