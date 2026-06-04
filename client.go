@@ -126,7 +126,8 @@ func defaultRabbitMQConfig() *conf.RabbitMQ {
 	}
 }
 
-// InitializeResources initializes the plugin with configuration
+// InitializeResources scans RabbitMQ configuration and wires up the health checker,
+// connection manager, retry handler, and goroutine pool.
 func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
 	if err := r.BasePlugin.InitializeResources(rt); err != nil {
 		return err
@@ -233,12 +234,12 @@ func normalizeRabbitMQConfig(cfg *conf.RabbitMQ) error {
 	return nil
 }
 
-// StartupTasks initializes RabbitMQ client and performs health check
+// StartupTasks connects to RabbitMQ, initializes producers/consumers, and starts health checks.
 func (r *RabbitMQClient) StartupTasks() error {
 	return r.startupWithContext(context.Background())
 }
 
-// CleanupTasks gracefully shuts down the plugin
+// CleanupTasks stops all producers/consumers and closes the AMQP connection.
 func (r *RabbitMQClient) CleanupTasks() error {
 	return r.cleanupWithContext(context.Background())
 }
