@@ -18,7 +18,7 @@ const (
 	defaultChannelPoolSize = 10
 	defaultVirtualHost     = "/"
 
-	// ExchangeTypeDirect Exchange types
+	// AMQP exchange types
 	ExchangeTypeDirect  = "direct"
 	ExchangeTypeFanout  = "fanout"
 	ExchangeTypeTopic   = "topic"

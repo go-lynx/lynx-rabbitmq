@@ -128,7 +128,6 @@ func defaultRabbitMQConfig() *conf.RabbitMQ {
 
 // InitializeResources initializes the plugin with configuration
 func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
-	// Initialize base plugin
 	if err := r.BasePlugin.InitializeResources(rt); err != nil {
 		return err
 	}
@@ -145,7 +144,6 @@ func (r *RabbitMQClient) InitializeResources(rt plugins.Runtime) error {
 	}
 	r.config = cfg
 
-	// Initialize managers
 	r.healthChecker = NewHealthChecker()
 	r.connectionManager = NewConnectionManager(r.config)
 	r.retryHandler = NewRetryHandler(r.config)
@@ -252,7 +250,6 @@ func (r *RabbitMQClient) startupWithContext(ctx context.Context) error {
 	}
 	r.publishRuntimeContract(false, false)
 
-	// Connect to RabbitMQ
 	if err := r.connect(); err != nil {
 		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
@@ -262,7 +259,6 @@ func (r *RabbitMQClient) startupWithContext(ctx context.Context) error {
 		return fmt.Errorf("rabbitmq startup canceled after connect: %w", err)
 	}
 
-	// Initialize producers
 	if err := r.initializeProducers(); err != nil {
 		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to initialize producers: %w", err)
@@ -272,7 +268,6 @@ func (r *RabbitMQClient) startupWithContext(ctx context.Context) error {
 		return fmt.Errorf("rabbitmq startup canceled after producer init: %w", err)
 	}
 
-	// Initialize consumers
 	if err := r.initializeConsumers(); err != nil {
 		r.publishRuntimeContract(false, false)
 		return fmt.Errorf("failed to initialize consumers: %w", err)
@@ -358,12 +353,10 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 		close(r.closeChan)
 	})
 
-	// Stop health checker
 	if r.healthChecker != nil {
 		r.healthChecker.Stop()
 	}
 
-	// Stop connection manager
 	if r.connectionManager != nil {
 		r.connectionManager.Stop()
 	}
@@ -372,12 +365,10 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	// never Ack/Nack on a channel that is being torn down underneath them.
 	r.subscriptionWG.Wait()
 
-	// Stop goroutine pool
 	if r.goroutinePool != nil {
 		r.goroutinePool.Wait()
 	}
 
-	// Close consumers
 	r.consumerMutex.Lock()
 	for name, channel := range r.consumers {
 		if channel != nil {
@@ -388,7 +379,6 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	r.consumers = make(map[string]*amqp.Channel)
 	r.consumerMutex.Unlock()
 
-	// Close producers
 	r.producerMutex.Lock()
 	for name, channel := range r.producers {
 		if channel != nil {
@@ -399,7 +389,6 @@ func (r *RabbitMQClient) cleanupWithContext(ctx context.Context) error {
 	r.producers = make(map[string]*amqp.Channel)
 	r.producerMutex.Unlock()
 
-	// Close connection
 	r.connectionMutex.Lock()
 	if r.connection != nil {
 		if err := r.connection.Close(); err != nil {
@@ -825,7 +814,6 @@ func (r *RabbitMQClient) PublishMessageWith(ctx context.Context, producerName, e
 // publishToChannel validates inputs and performs the actual AMQP publish with
 // metrics instrumentation.
 func (r *RabbitMQClient) publishToChannel(ctx context.Context, ch *amqp.Channel, exchange, routingKey string, body []byte, opts ...amqp.Publishing) error {
-	// --- input validation (integrates utils.go helpers) ---
 	if exchange != "" {
 		if err := validateExchange(exchange); err != nil {
 			return err
@@ -836,7 +824,8 @@ func (r *RabbitMQClient) publishToChannel(ctx context.Context, ch *amqp.Channel,
 		return ErrEmptyMessage
 	}
 
-	// --- build publishing ---
+	// Default to a persistent octet-stream message; an explicit opts[0] overrides
+	// it but the body and a zero timestamp are always filled in.
 	pub := amqp.Publishing{
 		ContentType:  "application/octet-stream",
 		DeliveryMode: amqp.Persistent,
@@ -915,7 +904,6 @@ func (r *RabbitMQClient) Subscribe(ctx context.Context, queue string, handler Me
 
 // SubscribeWith starts consuming using a named consumer channel.
 func (r *RabbitMQClient) SubscribeWith(ctx context.Context, consumerName, queue string, handler MessageHandler) error {
-	// --- input validation ---
 	if err := validateQueue(queue); err != nil {
 		return err
 	}

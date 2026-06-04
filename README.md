@@ -2,7 +2,7 @@
 
 ## Overview
 
-The RabbitMQ plugin provides integration with RabbitMQ message broker for the Lynx framework. It supports both producer and consumer functionality with comprehensive monitoring, health checks, and retry mechanisms.
+The RabbitMQ plugin integrates the RabbitMQ broker into the Lynx framework, providing named producers and consumers with health checks, metrics, retry, and automatic reconnection.
 
 ## Features
 
@@ -23,9 +23,9 @@ The RabbitMQ plugin provides integration with RabbitMQ message broker for the Ly
 - `username` (string, optional): Username for authentication.
 - `password` (string, optional): Password for authentication.
 - `virtual_host` (string, default: `"/"`): RabbitMQ virtual host.
-- `dial_timeout` (duration, default: `"10s"`): Connection timeout.
-- `heartbeat` (duration, default: `"10s"`): Heartbeat interval.
-- `channel_pool_size` (int32, default: `0`): Channel pool size.
+- `dial_timeout` (duration, default: `"3s"`): Connection timeout.
+- `heartbeat` (duration, default: `"30s"`): Heartbeat interval.
+- `channel_pool_size` (int32, default: `10`): Channel pool size.
 
 #### Producer Configuration
 - `enabled` (bool, default: `false`): Whether to enable the producer.
@@ -145,12 +145,11 @@ func main() {
         log.Fatal("rabbitmq plugin not initialized")
     }
 
-    // Define message handler
+    // The handler must NOT ack/nack itself: the plugin acks on a nil return and
+    // nacks (routing to a DLQ if configured) on a non-nil error, unless the
+    // consumer has auto_ack enabled.
     handler := func(ctx context.Context, msg amqp.Delivery) error {
         log.Printf("Received message: %s", string(msg.Body))
-        
-        // Acknowledge message
-        msg.Ack(false)
         return nil
     }
     
@@ -191,13 +190,12 @@ isHealthy := healthStats["is_healthy"].(bool)
 
 ## Health Checks
 
-The plugin includes built-in health checks that monitor:
+The plugin runs a periodic health check that probes the live connection by
+opening a temporary channel, and verifies:
 
-- Connection status
-- Channel health
-- Producer/Consumer readiness
-- Message processing health
-- Error rates and latencies
+- Connection status (open and not closed by the broker)
+- Connection-manager liveness
+- Producer/consumer channel readiness
 
 Health status can be checked programmatically:
 

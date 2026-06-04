@@ -27,7 +27,7 @@ func NewGoroutinePool(size int) *GoroutinePool {
 	return pool
 }
 
-// worker is the worker goroutine
+// worker drains tasks from the channel until it is closed by Wait/Close.
 func (p *GoroutinePool) worker() {
 	defer p.wg.Done()
 
@@ -38,7 +38,8 @@ func (p *GoroutinePool) worker() {
 	}
 }
 
-// Submit submits a task to the pool
+// Submit enqueues a task. If the pool is closed the task is dropped; if all
+// workers are busy and the queue is full it runs inline on the caller's goroutine.
 func (p *GoroutinePool) Submit(task func()) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -57,7 +58,7 @@ func (p *GoroutinePool) Submit(task func()) {
 	}
 }
 
-// Wait waits for all tasks to complete
+// Wait closes the task queue and blocks until all in-flight tasks finish.
 func (p *GoroutinePool) Wait() {
 	p.mu.Lock()
 	if !p.closed {
