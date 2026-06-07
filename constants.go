@@ -3,7 +3,7 @@ package rabbitmq
 const (
 	// Plugin metadata
 	pluginName        = "rabbitmq"
-	pluginVersion     = "v1.6.1"
+	pluginVersion     = "v1.6.3"
 	pluginDescription = "RabbitMQ message queue plugin for Lynx framework"
 	confPrefix        = "rabbitmq"
 
