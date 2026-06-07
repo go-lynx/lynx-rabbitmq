@@ -6,7 +6,7 @@ toolchain go1.26.2
 
 require (
 	github.com/go-kratos/kratos/v2 v2.9.2
-	github.com/go-lynx/lynx v1.6.2
+	github.com/go-lynx/lynx v1.6.3
 	github.com/rabbitmq/amqp091-go v1.11.0
 	google.golang.org/protobuf v1.36.10
 )
