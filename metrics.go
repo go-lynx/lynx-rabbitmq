@@ -184,7 +184,7 @@ func (m *Metrics) GetPrometheusMetrics() string {
 		"",
 		"# HELP lynx_rabbitmq_producer_latency_seconds Producer latency in seconds",
 		"# TYPE lynx_rabbitmq_producer_latency_seconds gauge",
-		fmt.Sprintf("lynx_rabbitmq_producer_latency_seconds %f", 
+		fmt.Sprintf("lynx_rabbitmq_producer_latency_seconds %f",
 			time.Duration(atomic.LoadInt64(&m.producerLatency)).Seconds()),
 		"",
 	)
@@ -193,12 +193,12 @@ func (m *Metrics) GetPrometheusMetrics() string {
 	metrics = append(metrics,
 		"# HELP lynx_rabbitmq_consumer_messages_received_total Total number of messages received",
 		"# TYPE lynx_rabbitmq_consumer_messages_received_total counter",
-		fmt.Sprintf("lynx_rabbitmq_consumer_messages_received_total %d", 
+		fmt.Sprintf("lynx_rabbitmq_consumer_messages_received_total %d",
 			atomic.LoadInt64(&m.consumerMessagesReceived)),
 		"",
 		"# HELP lynx_rabbitmq_consumer_messages_failed_total Total number of failed message consumptions",
 		"# TYPE lynx_rabbitmq_consumer_messages_failed_total counter",
-		fmt.Sprintf("lynx_rabbitmq_consumer_messages_failed_total %d", 
+		fmt.Sprintf("lynx_rabbitmq_consumer_messages_failed_total %d",
 			atomic.LoadInt64(&m.consumerMessagesFailed)),
 		"",
 		"# HELP lynx_rabbitmq_consumer_latency_seconds Consumer latency in seconds",
@@ -225,7 +225,7 @@ func (m *Metrics) GetPrometheusMetrics() string {
 	if atomic.LoadInt32(&m.isHealthy) == 1 {
 		healthyValue = 1
 	}
-	
+
 	metrics = append(metrics,
 		"# HELP lynx_rabbitmq_health_check_count_total Total number of health checks",
 		"# TYPE lynx_rabbitmq_health_check_count_total counter",

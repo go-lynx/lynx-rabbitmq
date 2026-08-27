@@ -8,7 +8,7 @@
 //
 //	import _ "github.com/go-lynx/lynx-rabbitmq"   // registers the plugin
 //
-// Configuration key: "rabbitmq" (YAML / proto).  See conf.RabbitMQ for all fields.
+// Configuration key: "lynx.rabbitmq" (YAML / proto).  See conf.RabbitMQ for all fields.
 package rabbitmq
 
 import (

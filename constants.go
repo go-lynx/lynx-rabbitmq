@@ -5,7 +5,7 @@ const (
 	pluginName        = "rabbitmq"
 	pluginVersion     = "v1.6.3"
 	pluginDescription = "RabbitMQ message queue plugin for Lynx framework"
-	confPrefix        = "rabbitmq"
+	confPrefix        = "lynx.rabbitmq"
 
 	// Default values
 	defaultDialTimeout     = "3s"

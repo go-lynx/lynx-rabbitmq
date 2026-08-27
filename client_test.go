@@ -233,18 +233,19 @@ func TestRabbitMQMetricsAndManagers(t *testing.T) {
 
 func TestInitializeResourcesLoadsRuntimeConfig(t *testing.T) {
 	rt := newRuntimeWithConfigFile(t, `
-rabbitmq:
-  urls:
-    - "amqp://service:secret@mq:5672/"
-  producers:
-    - name: "orders-producer"
-      enabled: true
-      exchange: "orders.exchange"
-  consumers:
-    - name: "orders-consumer"
-      enabled: true
-      queue: "orders.queue"
-  virtual_host: "/orders"
+lynx:
+  rabbitmq:
+    urls:
+      - "amqp://service:secret@mq:5672/"
+    producers:
+      - name: "orders-producer"
+        enabled: true
+        exchange: "orders.exchange"
+    consumers:
+      - name: "orders-consumer"
+        enabled: true
+        queue: "orders.queue"
+    virtual_host: "/orders"
 `)
 
 	client := NewRabbitMQClient()
@@ -277,9 +278,10 @@ rabbitmq:
 
 func TestInitializeResourcesRejectsInvalidConfig(t *testing.T) {
 	rt := newRuntimeWithConfigFile(t, `
-rabbitmq:
-  urls:
-    - ""
+lynx:
+  rabbitmq:
+    urls:
+      - ""
 `)
 
 	client := NewRabbitMQClient()
@@ -290,11 +292,12 @@ rabbitmq:
 
 func TestInitializeResourcesRejectsInvalidExchangeType(t *testing.T) {
 	rt := newRuntimeWithConfigFile(t, `
-rabbitmq:
-  producers:
-    - name: "orders-producer"
-      enabled: true
-      exchange_type: "invalid"
+lynx:
+  rabbitmq:
+    producers:
+      - name: "orders-producer"
+        enabled: true
+        exchange_type: "invalid"
 `)
 
 	client := NewRabbitMQClient()

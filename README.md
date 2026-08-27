@@ -57,21 +57,22 @@ The RabbitMQ plugin integrates the RabbitMQ broker into the Lynx framework, prov
 ### Basic Configuration Example
 
 ```yaml
-rabbitmq:
-  urls:
-    - "amqp://guest:guest@localhost:5672/"
-  producers:
-    - name: "default-producer"
-      enabled: true
-      exchange: "lynx.exchange"
-      exchange_type: "direct"
-      routing_key: "lynx.routing.key"
-  consumers:
-    - name: "default-consumer"
-      enabled: true
-      queue: "lynx.queue"
-      exchange: "lynx.exchange"
-      routing_key: "lynx.routing.key"
+lynx:
+  rabbitmq:
+    urls:
+      - "amqp://guest:guest@localhost:5672/"
+    producers:
+      - name: "default-producer"
+        enabled: true
+        exchange: "lynx.exchange"
+        exchange_type: "direct"
+        routing_key: "lynx.routing.key"
+    consumers:
+      - name: "default-consumer"
+        enabled: true
+        queue: "lynx.queue"
+        exchange: "lynx.exchange"
+        routing_key: "lynx.routing.key"
 ```
 
 Complete example: [conf/example_config.yml](./conf/example_config.yml).
